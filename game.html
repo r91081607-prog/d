@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Комета — космическая аркада</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #03050c; font-family: system-ui, sans-serif; color: #dff; }
+  canvas { display: block; touch-action: none; }
+  #ui { position: fixed; top: 12px; left: 16px; font-size: 18px; text-shadow: 0 0 6px #0ff; pointer-events: none; }
+  #menu { position: fixed; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; text-align: center; background: rgba(3,5,12,.75); }
+  #menu h1 { font-size: 56px; margin: 0 0 10px; color: #7ff; text-shadow: 0 0 20px #0ff; }
+  #menu p { max-width: 460px; line-height: 1.5; opacity: .9; }
+  button { font-size: 22px; padding: 12px 36px; border: 0; border-radius: 30px; background: #0cf; color: #012; cursor: pointer; box-shadow: 0 0 20px #0cf; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="ui"></div>
+<div id="menu">
+  <h1>КОМЕТА</h1>
+  <p id="msg">Веди корабль мышью, пальцем или стрелками.<br>⭐ Звёзды — очки, 🔵 щит спасает от одного удара,<br>☄️ астероиды — конец игры. Чем дальше, тем быстрее!</p>
+  <button id="play">Играть</button>
+</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const ui = document.getElementById('ui'), menu = document.getElementById('menu');
+let W, H; const resize = () => { W = cv.width = innerWidth; H = cv.height = innerHeight; }; resize(); addEventListener('resize', resize);
+
+const rnd = (a, b) => a + Math.random() * (b - a);
+let best = +localStorage.getItem('kometa-best') || 0;
+let state = 'menu', ship, things, parts, score, time, shield, spawnT, combo, comboT;
+const bg = Array.from({ length: 150 }, () => ({ x: Math.random(), y: Math.random(), z: rnd(.2, 1) }));
+const keys = {}; let target = null;
+addEventListener('keydown', e => keys[e.key] = true);
+addEventListener('keyup', e => keys[e.key] = false);
+const point = e => { const t = e.touches ? e.touches[0] : e; target = { x: t.clientX, y: t.clientY }; };
+cv.addEventListener('mousemove', point); cv.addEventListener('touchmove', e => { point(e); e.preventDefault(); }, { passive: false });
+cv.addEventListener('touchstart', point);
+
+// Простые звуки без файлов
+let ac; const beep = (f, d, type = 'sine', v = .15) => {
+  ac ||= new AudioContext(); const o = ac.createOscillator(), g = ac.createGain();
+  o.type = type; o.frequency.value = f; g.gain.setValueAtTime(v, ac.currentTime);
+  g.gain.exponentialRampToValueAtTime(.001, ac.currentTime + d); o.connect(g).connect(ac.destination); o.start(); o.stop(ac.currentTime + d);
+};
+
+function start() {
+  ship = { x: W / 2, y: H * .8, r: 14 }; target = null;
+  things = []; parts = []; score = 0; time = 0; shield = 0; spawnT = 0; combo = 1; comboT = 0;
+  state = 'play'; menu.style.display = 'none';
+}
+document.getElementById('play').onclick = start;
+addEventListener('keydown', e => { if (state !== 'play' && (e.key === 'Enter' || e.key === ' ')) start(); });
+
+function burst(x, y, color, n = 15) {
+  for (let i = 0; i < n; i++) { const a = rnd(0, 6.28), s = rnd(1, 5); parts.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 1, color }); }
+}
+
+function spawn() {
+  const speed = 2.5 + time * .04, r = Math.random();
+  if (r < .6) things.push({ kind: 'rock', x: rnd(0, W), y: -40, r: rnd(14, 34), vy: speed * rnd(.8, 1.4), vx: rnd(-1, 1), rot: 0, vr: rnd(-.05, .05),
+    shape: Array.from({ length: 9 }, () => rnd(.75, 1.15)) });
+  else if (r < .95) things.push({ kind: 'star', x: rnd(20, W - 20), y: -20, r: 11, vy: speed * .8, vx: 0, rot: 0, vr: .05 });
+  else things.push({ kind: 'shield', x: rnd(20, W - 20), y: -20, r: 13, vy: speed * .7, vx: 0, rot: 0, vr: 0 });
+}
+
+function gameOver() {
+  state = 'over'; burst(ship.x, ship.y, '#f84', 60); beep(110, .6, 'sawtooth', .2);
+  const s = Math.floor(score); if (s > best) { best = s; localStorage.setItem('kometa-best', best); }
+  setTimeout(() => {
+    document.getElementById('msg').innerHTML = `Счёт: <b>${s}</b><br>Рекорд: <b>${best}</b>`;
+    document.getElementById('play').textContent = 'Ещё раз'; menu.style.display = 'flex';
+  }, 900);
+}
+
+function update(dt) {
+  for (const s of bg) { s.y += s.z * .002 * dt * (state === 'play' ? 1 + time * .02 : 1); if (s.y > 1) { s.y = 0; s.x = Math.random(); } }
+  parts = parts.filter(p => (p.x += p.vx * dt, p.y += p.vy * dt, p.life -= .02 * dt) > 0);
+  if (state !== 'play') return;
+  time += dt / 60; score += dt / 60 * combo; spawnT -= dt;
+  if (spawnT <= 0) { spawn(); spawnT = Math.max(8, 40 - time * .8); }
+  if ((comboT -= dt) <= 0) combo = 1;
+
+  const k = 9 * dt;
+  if (keys.ArrowLeft || keys.a) ship.x -= k; if (keys.ArrowRight || keys.d) ship.x += k;
+  if (keys.ArrowUp || keys.w) ship.y -= k; if (keys.ArrowDown || keys.s) ship.y += k;
+  if (target) { ship.x += (target.x - ship.x) * .15 * dt; ship.y += (target.y - ship.y) * .15 * dt; }
+  ship.x = Math.max(15, Math.min(W - 15, ship.x)); ship.y = Math.max(15, Math.min(H - 15, ship.y));
+  if (Math.random() < .7) parts.push({ x: ship.x + rnd(-4, 4), y: ship.y + 16, vx: rnd(-.5, .5), vy: rnd(2, 4), life: .6, color: '#0ff' });
+
+  for (const t of things) {
+    t.x += t.vx * dt; t.y += t.vy * dt; t.rot += t.vr * dt;
+    if (Math.hypot(t.x - ship.x, t.y - ship.y) < t.r + ship.r * .8) {
+      t.dead = true;
+      if (t.kind === 'star') { score += 10 * combo; combo = Math.min(combo + 1, 9); comboT = 180; burst(t.x, t.y, '#ff4'); beep(600 + combo * 80, .15, 'triangle'); }
+      else if (t.kind === 'shield') { shield = 1; burst(t.x, t.y, '#4af'); beep(400, .3); }
+      else if (shield) { shield = 0; burst(t.x, t.y, '#4af', 30); beep(200, .3, 'square'); }
+      else return gameOver();
+    }
+  }
+  things = things.filter(t => !t.dead && t.y < H + 60);
+}
+
+function draw() {
+  ctx.fillStyle = '#03050c'; ctx.fillRect(0, 0, W, H);
+  for (const s of bg) { ctx.fillStyle = `rgba(200,230,255,${s.z})`; ctx.fillRect(s.x * W, s.y * H, s.z * 2, s.z * 2); }
+  for (const p of parts) { ctx.globalAlpha = Math.max(0, p.life); ctx.fillStyle = p.color; ctx.fillRect(p.x - 2, p.y - 2, 4, 4); }
+  ctx.globalAlpha = 1;
+  for (const t of things) {
+    ctx.save(); ctx.translate(t.x, t.y); ctx.rotate(t.rot);
+    if (t.kind === 'rock') {
+      ctx.fillStyle = '#7a5a48'; ctx.strokeStyle = '#c96'; ctx.lineWidth = 2; ctx.beginPath();
+      t.shape.forEach((m, i) => { const a = i / t.shape.length * 6.28; ctx.lineTo(Math.cos(a) * t.r * m, Math.sin(a) * t.r * m); });
+      ctx.closePath(); ctx.fill(); ctx.stroke();
+    } else if (t.kind === 'star') {
+      ctx.fillStyle = '#ff4'; ctx.shadowColor = '#ff0'; ctx.shadowBlur = 15; ctx.beginPath();
+      for (let i = 0; i < 10; i++) { const r = i % 2 ? t.r * .45 : t.r, a = i * Math.PI / 5 - Math.PI / 2; ctx.lineTo(Math.cos(a) * r, Math.sin(a) * r); }
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = '#4af'; ctx.lineWidth = 3; ctx.shadowColor = '#4af'; ctx.shadowBlur = 15;
+      ctx.beginPath(); ctx.arc(0, 0, t.r, 0, 6.28); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  if (state === 'play') {
+    ctx.save(); ctx.translate(ship.x, ship.y);
+    ctx.fillStyle = '#cff'; ctx.shadowColor = '#0ff'; ctx.shadowBlur = 20;
+    ctx.beginPath(); ctx.moveTo(0, -20); ctx.lineTo(14, 16); ctx.lineTo(0, 9); ctx.lineTo(-14, 16); ctx.closePath(); ctx.fill();
+    if (shield) { ctx.strokeStyle = '#4af'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(0, 0, 28 + Math.sin(time * 8) * 2, 0, 6.28); ctx.stroke(); }
+    ctx.restore();
+    ui.innerHTML = `Счёт: ${Math.floor(score)} &nbsp; ${combo > 1 ? 'Комбо x' + combo : ''}<br><small>Рекорд: ${best}</small>`;
+  } else ui.innerHTML = '';
+}
+
+let last = performance.now();
+(function loop(now) {
+  const dt = Math.min(3, (now - last) / 16.67); last = now;
+  update(dt); draw(); requestAnimationFrame(loop);
+})(last);
+</script>
+</body>
+</html>
